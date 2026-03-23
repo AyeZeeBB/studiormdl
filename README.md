@@ -7,7 +7,7 @@
 </div>
 
 > [!CAUTION]
-> **Notice:** StudioRMDL is not complete, issues and other bugs may arise. Please open an issue and descriptive
+> **Notice:** StudioRMDL is not complete, issues and other bugs may arise. Please open an issue and be descriptive with your issue and how to recreate it
 
 ## Features
 - **RUI Meshes:** Allows for RUI Meshes to be compiled into models
