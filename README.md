@@ -18,3 +18,9 @@
 
 ## Usage
 todo
+
+## Credits
+StudioRMDL wouldn't be possible without these people and their work:
+- **[rmdlconv](https://github.com/r-ex/rmdlconv) by rexx** – model conversion tool for Source & Respawn MDL formats (used for RMDL export logic)
+- **[R5-AnimConv](https://github.com/someoneatemylastsliceofpizza/R5-AnimConv) by someoneatemylastsliceofpizza** – animation converter for mdl animations to rseq/rrig, referenced for animation conversion.  
+- **[Resource Templates](https://github.com/IJARika/resource_model_templates) by Rika** – templates for models, animations, and rigs
