@@ -1169,22 +1169,27 @@ static bool R5_BuildVGData(r5_VGBuilder& b,
                     b.hdr.meshCount++;
                     newLOD.meshCount++;
 
-                    // Advance mesh vertex base for the next mesh.
-                    // When the VVD has no fixup tables all LOD levels reference the
-                    // same LOD-0 vertex pool, so we must stride by the LOD-0 count
-                    // (pMdlMesh->numvertices) rather than the per-LOD reduced count.
-                    // With fixups each LOD has its own remapped vertex layout, so
-                    // per-LOD counts are correct.
+                    // Advance the vertex-pool offset for the next mesh.
+                    //
+                    // Fixup path: numLODVertexes[lodIdx] is the authoritative count of
+                    // vertices this mesh contributes to lodVerts at the current LOD.
+                    // A value of 0 is legitimate — it means the mesh is fully stripped at
+                    // this LOD and adds nothing to lodVerts, so the stride is 0.
+                    // DO NOT fall back to pMdlMesh->numvertices here: that is the LOD-0
+                    // count and using it for a stripped mesh inflates localVertOffset,
+                    // pushing every subsequent mesh's vvdIdx out of range.
+                    //
+                    // No-fixup path: all LOD levels reference the same LOD-0 vertex pool,
+                    // so always stride by the LOD-0 count regardless of lodIdx.
                     int meshVertCount;
                     if (pVVD->numFixups > 0)
                     {
+                        // Trust numLODVertexes directly — 0 means 0 contribution.
                         meshVertCount = pMdlMesh->vertexloddata.numLODVertexes[lodIdx];
-                        if (meshVertCount == 0)
-                            meshVertCount = pMdlMesh->numvertices;
                     }
                     else
                     {
-                        // No fixups — always use LOD-0 count as the stride.
+                        // No fixups — always stride by the LOD-0 count.
                         meshVertCount = pMdlMesh->numvertices;
                         if (meshVertCount == 0)
                             meshVertCount = pMdlMesh->vertexloddata.numLODVertexes[0];

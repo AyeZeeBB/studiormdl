@@ -8212,42 +8212,70 @@ void Cmd_Hitbox( )
 	GetToken (false);
 	set->hitbox[set->numhitboxes].bmax[2] = verify_atof( token );
 	
-	if ( TokenAvailable() )
-	{
-		GetToken(false);
-		set->hitbox[set->numhitboxes].angOffsetOrientation[0] = verify_atof(token);
-		GetToken(false);
-		set->hitbox[set->numhitboxes].angOffsetOrientation[1] = verify_atof(token);
-		GetToken(false);
-		set->hitbox[set->numhitboxes].angOffsetOrientation[2] = verify_atof(token);
-	}
-	else
-	{
-		set->hitbox[set->numhitboxes].angOffsetOrientation = QAngle( 0, 0, 0 );
-	}
+	// Helper: returns true if 'token' is a valid floating-point number.
+	// An empty string ("") or a non-numeric string (bone/hitbox name) returns false.
+	auto IsNumericToken = [](const char* s) -> bool {
+		if (!s || s[0] == '\0') return false;
+		char* end;
+		strtod(s, &end);
+		return (end != s) && (*end == '\0');
+	};
+
+	// Peek at the next optional token.  It may be:
+	//   (a) 3 rotation-angle floats  (legacy / Valve QC)
+	//   (b) a capsule radius float   (optional, follows angles)
+	//   (c) a hitbox name string     (Crowbar 0.74+ outputs "" for empty names)
+	// Distinguish by checking whether the token parses as a number.
+	set->hitbox[set->numhitboxes].angOffsetOrientation = QAngle( 0, 0, 0 );
+	set->hitbox[set->numhitboxes].flCapsuleRadius = -1;
+	memset( set->hitbox[set->numhitboxes].hitboxname, 0, sizeof( set->hitbox[set->numhitboxes].hitboxname ) );
 
 	if ( TokenAvailable() )
 	{
 		GetToken(false);
-		set->hitbox[set->numhitboxes].flCapsuleRadius = verify_atof(token);
-	}
-	else
-	{
-		set->hitbox[set->numhitboxes].flCapsuleRadius = -1;
+		if ( IsNumericToken(token) )
+		{
+			// Rotation angles
+			set->hitbox[set->numhitboxes].angOffsetOrientation[0] = verify_atof(token);
+			GetToken(false);
+			set->hitbox[set->numhitboxes].angOffsetOrientation[1] = verify_atof(token);
+			GetToken(false);
+			set->hitbox[set->numhitboxes].angOffsetOrientation[2] = verify_atof(token);
+
+			// Optional capsule radius
+			if ( TokenAvailable() )
+			{
+				GetToken(false);
+				if ( IsNumericToken(token) )
+				{
+					set->hitbox[set->numhitboxes].flCapsuleRadius = verify_atof(token);
+				}
+				else
+				{
+					// Non-numeric after angles = hitbox name
+					strcpyn( set->hitbox[set->numhitboxes].hitboxname, token );
+					goto hitbox_done;
+				}
+			}
+
+			// Optional hitbox name after capsule radius
+			if ( TokenAvailable() )
+			{
+				GetToken(false);
+				strcpyn( set->hitbox[set->numhitboxes].hitboxname, token );
+			}
+		}
+		else
+		{
+			// Non-numeric token = hitbox name (e.g. Crowbar's trailing "")
+			strcpyn( set->hitbox[set->numhitboxes].hitboxname, token );
+		}
 	}
 
+hitbox_done:
 	//Scale hitboxes
 	scale_vertex( set->hitbox[set->numhitboxes].bmin );
 	scale_vertex( set->hitbox[set->numhitboxes].bmax );
-	// clear out the hitboxname:
-	memset( set->hitbox[set->numhitboxes].hitboxname, 0, sizeof( set->hitbox[set->numhitboxes].hitboxname ) );
-
-	// Grab the hit box name if present:
-	if( TokenAvailable() )
-	{
-		GetToken (false);
-		strcpyn( set->hitbox[set->numhitboxes].hitboxname, token );
-	}
 
 
 	set->numhitboxes++;
