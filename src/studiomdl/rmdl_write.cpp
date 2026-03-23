@@ -760,7 +760,7 @@ static uint64_t R5_HashString(const char* pData)
     uint32_t  v4 = (*v1 - 45 * ((~(*v1 ^ 0x5C5C5C5Cu) >> 7) & (((*v1 ^ 0x5C5C5C5Cu) - 0x1010101) >> 7) & 0x1010101)) & 0xDFDFDFDF;
 
     uint32_t  i;
-    for (i = ~*v1 & (*v1 - 0x1010101) & 0x80808080; !i; i = (*v1) & 0x80808080)
+    for (i = ~*v1 & (*v1 - 0x1010101u) & 0x80808080u; !i; i = ~*v1 & (*v1 - 0x1010101u) & 0x80808080u)
     {
         uint64_t v6 = v4;
         uint32_t v7 = v1[1];
@@ -768,10 +768,7 @@ static uint64_t R5_HashString(const char* pData)
         v3 += 4;
         v2 = ((((uint64_t)(0xFB8C4D96501ull * v6) >> 24) + 0x633D5F1ull * v2) >> 61)
            ^ (((uint64_t)(0xFB8C4D96501ull * v6) >> 24) + 0x633D5F1ull * v2);
-        uint32_t v8neg = ~v7 & (v7 - 0x1010101);
-        i = v8neg;
-        v4 = (v7 - 45 * ((~(v7 ^ 0x5C5C5C5Cu) >> 7) & (((v7 ^ 0x5C5C5C5Cu) - 0x1010101) >> 7) & 0x1010101)) & 0xDFDFDFDF;
-        (void)v8neg;
+        v4 = (v7 - 45 * ((~(v7 ^ 0x5C5C5C5Cu) >> 7) & (((v7 ^ 0x5C5C5C5Cu) - 0x1010101u) >> 7) & 0x1010101u)) & 0xDFDFDFDFu;
     }
 
     int v9 = -1;
