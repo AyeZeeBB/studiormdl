@@ -47,7 +47,22 @@ StudioRMDL wouldn't be possible without these people and their work:
   </a>
 </td>
 
+<td align="center" width="170">
+  <a href="https://github.com/WateryContinent/qcforge">
+    <img src="/assets/qcgenlogo.png" width="80" height="80"><br>
+    <b>QCForge</b><br>
+  </a>
+</td>
+
 </tr>
 </table>
 
+<<<<<<< Updated upstream
 </div>
+=======
+<div align="center">
+  <h3><b><a href="https://discord.gg/s66qvh4brh">My Discord</a></b></h3>
+</div>
+
+</div>
+>>>>>>> Stashed changes
