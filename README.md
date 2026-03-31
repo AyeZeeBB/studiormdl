@@ -57,12 +57,8 @@ StudioRMDL wouldn't be possible without these people and their work:
 </tr>
 </table>
 
-<<<<<<< Updated upstream
-</div>
-=======
 <div align="center">
   <h3><b><a href="https://discord.gg/s66qvh4brh">My Discord</a></b></h3>
 </div>
 
 </div>
->>>>>>> Stashed changes
