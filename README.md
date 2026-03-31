@@ -17,7 +17,43 @@
 - **RUI DUMPING:** Included **Python** script that can dump RUI Meshes from RMDL's for use
 
 ## Usage
-todo
+### Basic usage
+```
+studiormdl.exe -game <gamedir> mymodel.qc
+```
+***
+**Note :** `-game` is not required and can be used standalone
+```
+studiormdl.exe mymodel.qc
+```
+***
+### Supported QC commands
+
+All standard studiomdl QC commands work normally.  The following are specific to this build or have Apex-specific behaviour:
+
+### `$ruimeshfile` *(Apex-specific)*
+```
+$ruimeshfile "mymodel.rui"
+```
+Embeds a `.rui` RUI-mesh file into the RMDL.  Only needed for models that have Respawn UI panels attached to bones (e.g. weapon stat displays, ammo counters).  Most models don't need this — omit it for props and regular weapons.
+
+### `$renamematerial` rather than `$cdmaterials`
+`$cdmaterials` work fine if you have a single material or multiple materials have that you want to be in the same material dir, however using if you need to have them in different directories, use `$renamematerials` as shown below
+
+```$renamematerial "mc_mtl_p7_zm_vending_pap_detail" "models\zombies\vending_pap_detail_rgdp"
+$renamematerial "mc_mtl_p7_zm_vending_pap_frame_right" "models\zombies\vending_pap_frame_right_rgdp"
+$renamematerial "mc_mtl_p7_zm_vending_pap_frame_left" "models\zombies\vending_pap_frame_left_rgdp"
+$renamematerial "mc_mtl_p7_zm_vending_pap_side_inside" "models\zombies\vending_pap_side_inside_rgdp"
+$renamematerial "mc_mtl_p7_zm_vending_pap_top_main" "models\zombies\vending_pap_top_main_rgdp"
+$renamematerial "mc_mtl_p7_zm_vending_pap_top" "models\zombies\vending_pap_top_rgdp"
+$renamematerial "mc_mtl_p7_zm_vending_pap_front_side" "models\zombies\vending_pap_front_side_rgdp"
+$renamematerial "mc_mtl_p7_zm_vending_pap_bottom_back" "models\zombies\vending_pap_bottom_back_rgdp"
+$renamematerial "mc_mtl_p7_zm_vending_packapunch" "models\zombies\vending_packapunch_rgdp"
+$renamematerial "mc_mtl_p7_zm_vending_pap_logo" "models\zombies\vending_pap_logo_rgdp"
+$renamematerial "mc_mtl_p7_zm_vending_packapunch_sign" "models\zombies\vending_packapunch_sign_rgdp"
+$renamematerial "mc_mtl_p7_zm_vending_pap_leather" "models\zombies\vending_pap_leather_rgdp"
+$renamematerial "mc_mtl_p7_zm_vending_pap_roller" "models\zombies\vending_pap_roller_rgdp" 
+```
 
 ## Credits
 StudioRMDL wouldn't be possible without these people and their work:
