@@ -1158,7 +1158,11 @@ static bool R5_BuildVGData(r5_VGBuilder& b,
                     b.strips.push_back(hwStrip);
 
                     if (newMesh.vertCount == 0)
+                    {
                         newMesh.flags = 0;
+                        newMesh.stripCount = 0;
+                        b.strips.pop_back();  // undo the strip pushed above; empty meshes have no strips
+                    }
 
                     newMesh.vertCacheSize = R5_CalcVertexSize(newMesh.flags & ~VG_VERTEX_HAS_UNK);
                     b.currentVertBufferSize += (size_t)newMesh.vertCacheSize * newMesh.vertCount;
@@ -2409,7 +2413,8 @@ void WriteRMDLFiles(const studiohdr_t* pInMemMDL, const char* mdlFilePath)
     s_pHdr->rootLOD        = pOldHdr->rootLOD;
     s_pHdr->numAllowedRootLODs = pOldHdr->numAllowedRootLODs;
     s_pHdr->flVertAnimFixedPointScale = pOldHdr->flVertAnimFixedPointScale;
-    s_pHdr->phyOffset = -123456; // sentinel used by rmdlconv for version detection
+    s_pHdr->phyOffset = -123456;  // sentinel for no embedded .phy (matches rmdlconv and working game models)
+    s_pHdr->phySize   = 0;
 
     s_pData += sizeof(r5_studiohdr_t);
 
@@ -2525,25 +2530,96 @@ void WriteRMDLFiles(const studiohdr_t* pInMemMDL, const char* mdlFilePath)
     s_stringTable.clear();
 
     //-----------------------------------------------------------------------
-    // Move .phy from gamedir\models\...\stem.phy → compiled\stem.phy
-    // Then remove any empty directories left behind under gamedir\models\
+    // Convert studiomdl .phy → Apex IVPS format and write to compiled\.
+    //
+    // studiomdl writes Source Engine format (16-byte header):
+    //   int size=16, int id=0, int solidCount, int checkSum
+    //   then per solid: int solidSize, char[4] "VPHY", ... IVP data ...
+    //   then keyvalue text at the end
+    //
+    // Apex expects IVPS format (20-byte header):
+    //   int size=20, int id=1, int solidCount, int checkSum, int keyValuesOffset
+    //   then immediately: IVP data (same bytes, no VPHY prefix)
+    //   then keyvalue text
+    //
+    // The actual collision geometry (IVP/SOLEX) is identical between formats.
+    // Only the header and the 8-byte "solidSize+VPHY" per-solid prefix differ.
     //-----------------------------------------------------------------------
     {
         DWORD attr = GetFileAttributesA(phySrc.c_str());
         if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY))
         {
-            if (MoveFileExA(phySrc.c_str(), phyDst.c_str(),
-                            MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED))
+            // Read studiomdl-generated phy
+            FILE* phyIn = fopen(phySrc.c_str(), "rb");
+            if (phyIn)
             {
-                printf("  [PHY] Moved: %s\n", phyDst.c_str());
+                fseek(phyIn, 0, SEEK_END);
+                long phyFileSize = ftell(phyIn);
+                fseek(phyIn, 0, SEEK_SET);
+                char* phyBuf = new char[phyFileSize];
+                fread(phyBuf, 1, phyFileSize, phyIn);
+                fclose(phyIn);
+                remove(phySrc.c_str());
+
+                // Parse Source Engine phyheader_t (16 bytes)
+                // struct { int size; int id; int solidCount; int checkSum; }
+                int srcSolidCount = *reinterpret_cast<int*>(phyBuf + 8);
+
+                // After the 16-byte header, each solid is: int solidSize + solidSize bytes of data.
+                // The first 4 bytes of that data are the "VPHY" magic — skip them too.
+                // So actual IVP data starts at: 16 + 4(solidSize) + 4(VPHY) = offset 24.
+                // solidSize includes the VPHY magic, so actual IVP size = solidSize - 4.
+                int srcSolidSize = *reinterpret_cast<int*>(phyBuf + 16);  // per-solid byte count
+                int ivpDataSize  = srcSolidSize - 4;                       // skip "VPHY" magic
+                const char* ivpData = phyBuf + 16 + 4 + 4;               // skip solidSize(4) + VPHY(4)
+
+                // Keyvalue text follows immediately after the solid(s).
+                // For single-solid models: keyvalue starts at 16 + 4 + srcSolidSize
+                long kvStart    = 16 + 4 + srcSolidSize;
+                long kvSize     = phyFileSize - kvStart;
+                const char* kvData = phyBuf + kvStart;
+
+                // Build Apex IVPS header (20 bytes).
+                // keyValuesOffset = distance from start of IVPS header to keyvalue text
+                //                 = 20 (header) + ivpDataSize
+                int keyValuesOffset = 20 + ivpDataSize;
+
+                struct IVPSHeader {
+                    int size;            // 20
+                    int id;              // 1
+                    int solidCount;
+                    int checkSum;
+                    int keyValuesOffset;
+                };
+                IVPSHeader ivpsHdr;
+                ivpsHdr.size            = 20;
+                ivpsHdr.id              = 1;
+                ivpsHdr.solidCount      = srcSolidCount;
+                ivpsHdr.checkSum        = s_pHdr->checksum;
+                ivpsHdr.keyValuesOffset = keyValuesOffset;
+
+                FILE* phyOut = fopen(phyDst.c_str(), "wb");
+                if (phyOut)
+                {
+                    fwrite(&ivpsHdr, sizeof(IVPSHeader), 1, phyOut);
+                    fwrite(ivpData, 1, ivpDataSize, phyOut);
+                    if (kvSize > 0) fwrite(kvData, 1, kvSize, phyOut);
+                    fclose(phyOut);
+                    printf("  [PHY] Converted to Apex IVPS format: %s\n", phyDst.c_str());
+                }
+                else
+                {
+                    printf("  [PHY] WARNING: could not write '%s' (error %lu)\n",
+                           phyDst.c_str(), GetLastError());
+                }
+
+                delete[] phyBuf;
             }
             else
             {
-                printf("  [PHY] WARNING: could not move phy to '%s' (error %lu)\n",
-                       phyDst.c_str(), GetLastError());
+                printf("  [PHY] WARNING: could not read '%s'\n", phySrc.c_str());
             }
         }
-
     }
 
     //-----------------------------------------------------------------------

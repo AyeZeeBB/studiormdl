@@ -6,3 +6,4 @@ src/lib/public/appframework.lib
 /references
 /src/lib/public
 build_output.txt
+*.lib
