@@ -1917,6 +1917,7 @@ static void R5_WriteKeyValues()
 
 static void R5_ConvertSrcBoneTransforms(const studiohdr_t* pOld)
 {
+    if (!pOld->studiohdr2index) return;
     const studiohdr2_t* pHdr2 = pOld->pStudioHdr2();
     int num = pHdr2->numsrcbonetransform;
     if (num <= 0) return;
@@ -1948,6 +1949,7 @@ static void R5_ConvertSrcBoneTransforms(const studiohdr_t* pOld)
 
 static void R5_ConvertLinearBones(const studiohdr_t* pOld)
 {
+    if (!pOld->studiohdr2index) return;
     const studiohdr2_t* pHdr2 = pOld->pStudioHdr2();
     if (!pHdr2->linearboneindex || pOld->numbones <= 1)
         return;
@@ -2037,6 +2039,22 @@ static std::string R5_FileStem(const std::string& path)
     size_t dot = name.rfind('.');
     if (dot != std::string::npos) name = name.substr(0, dot);
     return name;
+}
+
+// Recursively create all directories in a path.
+static void R5_CreateDirsRecursive(const std::string& dirPath)
+{
+    for (size_t i = 0; i < dirPath.size(); ++i)
+    {
+        if (dirPath[i] == '\\' || dirPath[i] == '/')
+        {
+            std::string partial = dirPath.substr(0, i);
+            if (!partial.empty())
+                CreateDirectoryA(partial.c_str(), NULL);
+        }
+    }
+    if (!dirPath.empty())
+        CreateDirectoryA(dirPath.c_str(), NULL);
 }
 
 // Extract the path relative to gamedir, stripping an optional leading "models\" component.
@@ -2314,29 +2332,37 @@ void WriteRMDLFiles(const studiohdr_t* pInMemMDL, const char* mdlFilePath)
     std::string vvdPath  = R5_ReplaceExt(mdlPath, ".vvd");
     std::string vtxPath  = R5_ReplaceExt(mdlPath, ".dx90.vtx");
 
-    // All output goes into gamedir\compiled\:
-    //   gamedir\compiled\modelname.rmdl
-    //   gamedir\compiled\modelname.vg
-    //   gamedir\compiled\modelname.phy   (moved from gamedir\models\...\modelname.phy)
-    //   gamedir\compiled\animrig\...     (written by animconv)
+    // All output goes into gamedir\compiled\<modelname_path>\:
+    //   gamedir\compiled\weapons\smr\w_smr.rmdl
+    //   gamedir\compiled\weapons\smr\w_smr.vg
+    //   gamedir\compiled\weapons\smr\w_smr.phy
+    //   gamedir\compiled\animrig\...     (written by animconv, includes .rrig + .txt)
     //   gamedir\compiled\animseq\...     (written by animconv)
-    //   gamedir\compiled\outjson.txt     (written by animconv)
     std::string gamedirStr(gamedir);
     if (!gamedirStr.empty() && gamedirStr.back() != '\\' && gamedirStr.back() != '/')
         gamedirStr += '\\';
 
-    // compiled output root — create it if it doesn't exist
+    // compiled output root
     const std::string compiledDir = gamedirStr + "compiled\\";
-    CreateDirectoryA(compiledDir.c_str(), NULL);
 
-    const std::string stem     = R5_FileStem(mdlPath);
-    const std::string rmdlPath = compiledDir + stem + ".rmdl";
-    const std::string vgPath   = compiledDir + stem + ".vg";
+    // Relative path from $modelname (strip gamedir + "models\\" prefix, keep subdirs)
+    const std::string relPath = R5_RelativeToGamedir(mdlPath, gamedirStr);
+    const std::string relStem = R5_ReplaceExt(relPath, "");
+
+    // Build output dir preserving $modelname subdirectory structure
+    const std::string rmdlPath = compiledDir + relStem + ".rmdl";
+    const std::string vgPath   = compiledDir + relStem + ".vg";
+
+    // Create all directories in the output path
+    {
+        size_t lastSlash = rmdlPath.find_last_of("\\/");
+        if (lastSlash != std::string::npos)
+            R5_CreateDirsRecursive(rmdlPath.substr(0, lastSlash));
+    }
 
     // Where collisionmodel.cpp wrote the phy (gamedir\models\<rel>\stem.phy)
-    const std::string relStem  = R5_ReplaceExt(R5_RelativeToGamedir(mdlPath, gamedirStr), "");
     const std::string phySrc   = gamedirStr + "models\\" + relStem + ".phy";
-    const std::string phyDst   = compiledDir + stem + ".phy";
+    const std::string phyDst   = compiledDir + relStem + ".phy";
 
     // MDL is already in memory — no disk read needed.
     const studiohdr_t* pOldHdr = pInMemMDL;
@@ -2406,7 +2432,7 @@ void WriteRMDLFiles(const studiohdr_t* pInMemMDL, const char* mdlFilePath)
     s_pHdr->numlocalattachments = pOldHdr->numlocalattachments;
     s_pHdr->keyvaluesize   = pOldHdr->keyvaluesize;
     s_pHdr->numincludemodels = -1;
-    s_pHdr->numsrcbonetransform = pOldHdr->pStudioHdr2()->numsrcbonetransform;
+    s_pHdr->numsrcbonetransform = pOldHdr->studiohdr2index ? pOldHdr->pStudioHdr2()->numsrcbonetransform : 0;
     s_pHdr->mass           = pOldHdr->mass;
     s_pHdr->contents       = pOldHdr->contents;
     s_pHdr->constdirectionallightdot = pOldHdr->constdirectionallightdot;
@@ -2520,6 +2546,7 @@ void WriteRMDLFiles(const studiohdr_t* pInMemMDL, const char* mdlFilePath)
     //-----------------------------------------------------------------------
     // Cleanup in-memory buffers
     //-----------------------------------------------------------------------
+    const int savedChecksum = s_pHdr ? s_pHdr->checksum : pOldHdr->checksum;
     delete[] s_pBase;
     delete[] vvdBuf;
     delete[] vtxBuf;
@@ -2549,6 +2576,7 @@ void WriteRMDLFiles(const studiohdr_t* pInMemMDL, const char* mdlFilePath)
         DWORD attr = GetFileAttributesA(phySrc.c_str());
         if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY))
         {
+            printf("  [PHY] Found source: %s\n", phySrc.c_str());
             // Read studiomdl-generated phy
             FILE* phyIn = fopen(phySrc.c_str(), "rb");
             if (phyIn)
@@ -2595,7 +2623,7 @@ void WriteRMDLFiles(const studiohdr_t* pInMemMDL, const char* mdlFilePath)
                 ivpsHdr.size            = 20;
                 ivpsHdr.id              = 1;
                 ivpsHdr.solidCount      = srcSolidCount;
-                ivpsHdr.checkSum        = s_pHdr->checksum;
+                ivpsHdr.checkSum        = savedChecksum;
                 ivpsHdr.keyValuesOffset = keyValuesOffset;
 
                 FILE* phyOut = fopen(phyDst.c_str(), "wb");
@@ -2619,6 +2647,10 @@ void WriteRMDLFiles(const studiohdr_t* pInMemMDL, const char* mdlFilePath)
             {
                 printf("  [PHY] WARNING: could not read '%s'\n", phySrc.c_str());
             }
+        }
+        else
+        {
+            printf("  [PHY] No source .phy found at '%s' (model has no $collisionmodel?)\n", phySrc.c_str());
         }
     }
 

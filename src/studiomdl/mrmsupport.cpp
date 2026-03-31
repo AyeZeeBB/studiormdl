@@ -1,4 +1,4 @@
-//========= Copyright © 1996-2008, Valve Corporation, All rights reserved. ============//
+//========= Copyright ï¿½ 1996-2008, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -771,6 +771,19 @@ static void RemapVertexAnimations( s_source_t *pSource, int *pVListToDesired )
 //-----------------------------------------------------------------------------
 void BuildIndividualMeshes( s_source_t *pSource )
 {	
+	// Free previous allocations if this is a repeated call (multi-section SMDs)
+	if ( pSource->vertex )
+	{
+		free( pSource->vertex );
+		pSource->vertex = NULL;
+	}
+	if ( pSource->face )
+	{
+		free( pSource->face );
+		pSource->face = NULL;
+	}
+	pSource->nummeshes = 0;
+
 	int *v_listsort = (int *)malloc( g_numvlist * sizeof( int ) );	// map desired order to vlist entry
 	int *v_ilistsort = (int *)malloc( g_numvlist * sizeof( int ) );	// map vlist entry to desired order
 	int *facesort = (int *)malloc( g_numfaces * sizeof( int ) );		// map desired order to src_face entry
