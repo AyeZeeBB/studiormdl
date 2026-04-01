@@ -21,6 +21,8 @@
 #include "optimize.h"
 #include "mathlib/mathlib.h"
 #include "tier0/icommandline.h"
+#include "vphysics_interface.h"
+#include "mathlib/polyhedron.h"
 
 // R5-AnimConv integration — produces .rrig/.rseq alongside the .rmdl
 #include "animconv_wrapper.h"
@@ -71,9 +73,10 @@ extern char gamedir[1024];
 #define MATERIAL_TYPE_SKNP 0x4  // skinned
 
 // Studiohdr flags we need
-#define R5_STUDIOHDR_FLAGS_STATIC_PROP    0x10
+#define R5_STUDIOHDR_FLAGS_STATIC_PROP       0x10
+#define R5_STUDIOHDR_FLAGS_HAS_PHYSICS_DATA  0x40000
 #define R5_STUDIOHDR_FLAGS_USES_VERTEX_COLOR 0x1000000
-#define R5_STUDIOHDR_FLAGS_USES_UV2       0x2000000
+#define R5_STUDIOHDR_FLAGS_USES_UV2          0x2000000
 
 #define MAX_NUM_LODS_R5 8
 #define RMDL_FILEBUF_SIZE (32 * 1024 * 1024)
@@ -2557,27 +2560,31 @@ void WriteRMDLFiles(const studiohdr_t* pInMemMDL, const char* mdlFilePath)
     s_stringTable.clear();
 
     //-----------------------------------------------------------------------
-    // Convert studiomdl .phy → Apex IVPS format and write to compiled\.
+    // Convert studiomdl .phy → Apex relocatable-blob PHY format.
     //
-    // studiomdl writes Source Engine format (16-byte header):
-    //   int size=16, int id=0, int solidCount, int checkSum
-    //   then per solid: int solidSize, char[4] "VPHY", ... IVP data ...
-    //   then keyvalue text at the end
+    // Source Engine produces IVP compact-surface collision data which is
+    // incompatible with Apex's native physics geometry format.  We
+    // deserialise each CPhysCollide, extract polyhedron data via
+    // IPhysicsCollision, and repack as an Apex relocatable blob (id >= 1).
     //
-    // Apex expects IVPS format (20-byte header):
-    //   int size=20, int id=1, int solidCount, int checkSum, int keyValuesOffset
-    //   then immediately: IVP data (same bytes, no VPHY prefix)
-    //   then keyvalue text
+    // Apex .phy file layout:
+    //   [20-byte IVPS header]  { size=20, id>=1, solidCount, checkSum, kvOffset }
+    //   [relocatable blob]     self-relative pointers, fixed up by loader
+    //   [key-value text]       Source-style physics properties
     //
-    // The actual collision geometry (IVP/SOLEX) is identical between formats.
-    // Only the header and the 8-byte "solidSize+VPHY" per-solid prefix differ.
+    // Blob layout (all offsets relative to blob start):
+    //   BlobHeader (32 B)  →  Solid[] (144 B each)  →  Convex[] (64 B each)
+    //   →  vertex data (float[3] per vert)
+    //   →  face data   (32 B per face, byte vertex indices, 0xFF pad)
+    //   →  edge data   (4 B per edge: u8 v0, u8 v1, u8 faceA, u8 faceB)
     //-----------------------------------------------------------------------
     {
+        extern IPhysicsCollision *physcollision;
+
         DWORD attr = GetFileAttributesA(phySrc.c_str());
         if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY))
         {
             printf("  [PHY] Found source: %s\n", phySrc.c_str());
-            // Read studiomdl-generated phy
             FILE* phyIn = fopen(phySrc.c_str(), "rb");
             if (phyIn)
             {
@@ -2589,51 +2596,354 @@ void WriteRMDLFiles(const studiohdr_t* pInMemMDL, const char* mdlFilePath)
                 fclose(phyIn);
                 remove(phySrc.c_str());
 
-                // Parse Source Engine phyheader_t (16 bytes)
-                // struct { int size; int id; int solidCount; int checkSum; }
+                // --- Parse Source phyheader_t (16-byte) ---
+                int srcHdrSize    = *reinterpret_cast<int*>(phyBuf + 0);
                 int srcSolidCount = *reinterpret_cast<int*>(phyBuf + 8);
 
-                // After the 16-byte header, each solid is: int solidSize + solidSize bytes of data.
-                // The first 4 bytes of that data are the "VPHY" magic — skip them too.
-                // So actual IVP data starts at: 16 + 4(solidSize) + 4(VPHY) = offset 24.
-                // solidSize includes the VPHY magic, so actual IVP size = solidSize - 4.
-                int srcSolidSize = *reinterpret_cast<int*>(phyBuf + 16);  // per-solid byte count
-                int ivpDataSize  = srcSolidSize - 4;                       // skip "VPHY" magic
-                const char* ivpData = phyBuf + 16 + 4 + 4;               // skip solidSize(4) + VPHY(4)
+                // Walk solids to find key-value text boundary.
+                long cursor = srcHdrSize;
+                for (int i = 0; i < srcSolidCount; i++)
+                {
+                    if (cursor + 4 > phyFileSize) break;
+                    int solidSize = *reinterpret_cast<int*>(phyBuf + cursor);
+                    cursor += 4 + solidSize;
+                }
+                long kvStart = cursor;
+                long kvSize  = phyFileSize - kvStart;
+                if (kvSize < 0) kvSize = 0;
 
-                // Keyvalue text follows immediately after the solid(s).
-                // For single-solid models: keyvalue starts at 16 + 4 + srcSolidSize
-                long kvStart    = 16 + 4 + srcSolidSize;
-                long kvSize     = phyFileSize - kvStart;
-                const char* kvData = phyBuf + kvStart;
+                // ---------------------------------------------------------------
+                // Deserialise each solid's collision data into CPhysCollide
+                // objects, extract convex polyhedron geometry, and build the
+                // Apex relocatable blob.
+                // ---------------------------------------------------------------
 
-                // Build Apex IVPS header (20 bytes).
-                // keyValuesOffset = distance from start of IVPS header to keyvalue text
-                //                 = 20 (header) + ivpDataSize
-                int keyValuesOffset = 20 + ivpDataSize;
+                // --- Collect per-solid / per-convex / raw geometry data ---
+                struct ConvexData {
+                    std::vector<Vector>                       verts;
+                    std::vector<std::vector<uint8_t>>         faces;     // per face: vertex indices
+                    struct Edge { uint8_t v[4]; };             // {v0,v1,faceA,faceB}
+                    std::vector<Edge>                         edges;
+                    float center[3];
+                    float inradius;
+                };
+                struct SolidData {
+                    std::vector<ConvexData> convexes;
+                    Vector aabbMins, aabbMaxs;
+                    Vector massCenter;
+                    float  volume;
+                };
+                std::vector<SolidData> solids;
 
+                long solidCursor = srcHdrSize;
+                for (int si = 0; si < srcSolidCount; si++)
+                {
+                    if (solidCursor + 4 > phyFileSize) break;
+                    int solidSize = *reinterpret_cast<int*>(phyBuf + solidCursor);
+                    char* solidBuf = phyBuf + solidCursor + 4;
+                    solidCursor += 4 + solidSize;
+
+                    CPhysCollide* pCollide = physcollision->UnserializeCollide(
+                        solidBuf, solidSize, si);
+                    if (!pCollide) {
+                        printf("  [PHY] WARNING: UnserializeCollide failed for solid %d\n", si);
+                        continue;
+                    }
+
+                    SolidData sd;
+                    sd.volume = physcollision->CollideVolume(pCollide);
+                    physcollision->CollideGetMassCenter(pCollide, &sd.massCenter);
+                    physcollision->CollideGetAABB(&sd.aabbMins, &sd.aabbMaxs,
+                        pCollide, vec3_origin, vec3_angle);
+
+                    // Extract convex pieces.
+                    const int kMaxConvexes = 256;
+                    CPhysConvex* convexArray[kMaxConvexes];
+                    int numConvex = physcollision->GetConvexesUsedInCollideable(
+                        pCollide, convexArray, kMaxConvexes);
+
+                    for (int ci = 0; ci < numConvex; ci++)
+                    {
+                        CPolyhedron* poly = physcollision->PolyhedronFromConvex(
+                            convexArray[ci], false);
+                        if (!poly || poly->iVertexCount == 0) {
+                            printf("  [PHY] WARNING: PolyhedronFromConvex returned "
+                                   "null/empty for solid %d convex %d\n", si, ci);
+                            if (poly) poly->Release();
+                            continue;
+                        }
+
+                        ConvexData cd;
+
+                        // --- Vertices ---
+                        for (int vi = 0; vi < poly->iVertexCount; vi++)
+                            cd.verts.push_back(poly->pVertices[vi]);
+
+                        // --- Faces (polygon vertex indices from line refs) ---
+                        for (int fi = 0; fi < poly->iPolygonCount; fi++)
+                        {
+                            const Polyhedron_IndexedPolygon_t& pg = poly->pPolygons[fi];
+                            std::vector<uint8_t> faceVerts;
+                            for (int ri = 0; ri < pg.iIndexCount; ri++)
+                            {
+                                const Polyhedron_IndexedLineReference_t& ref =
+                                    poly->pIndices[pg.iFirstIndex + ri];
+                                const Polyhedron_IndexedLine_t& line =
+                                    poly->pLines[ref.iLineIndex];
+                                faceVerts.push_back(
+                                    (uint8_t)line.iPointIndices[ref.iEndPointIndex]);
+                            }
+                            cd.faces.push_back(std::move(faceVerts));
+                        }
+
+                        // --- Edges → {v0, v1, faceA, faceB} ---
+                        // Build edge-to-face map: each line is shared by 2 faces.
+                        std::vector<uint8_t> lineFaceA(poly->iLineCount, 0xFF);
+                        std::vector<uint8_t> lineFaceB(poly->iLineCount, 0xFF);
+                        for (int fi = 0; fi < poly->iPolygonCount; fi++)
+                        {
+                            const Polyhedron_IndexedPolygon_t& pg = poly->pPolygons[fi];
+                            for (int ri = 0; ri < pg.iIndexCount; ri++)
+                            {
+                                unsigned short li =
+                                    poly->pIndices[pg.iFirstIndex + ri].iLineIndex;
+                                if (lineFaceA[li] == 0xFF)
+                                    lineFaceA[li] = (uint8_t)fi;
+                                else
+                                    lineFaceB[li] = (uint8_t)fi;
+                            }
+                        }
+                        for (int li = 0; li < poly->iLineCount; li++)
+                        {
+                            ConvexData::Edge e;
+                            e.v[0] = (uint8_t)poly->pLines[li].iPointIndices[0];
+                            e.v[1] = (uint8_t)poly->pLines[li].iPointIndices[1];
+                            e.v[2] = lineFaceA[li];
+                            e.v[3] = lineFaceB[li];
+                            cd.edges.push_back(e);
+                        }
+
+                        // --- Convex center & inradius ---
+                        Vector cvxMins = cd.verts[0], cvxMaxs = cd.verts[0];
+                        for (size_t vi = 1; vi < cd.verts.size(); vi++) {
+                            VectorMin(cd.verts[vi], cvxMins, cvxMins);
+                            VectorMax(cd.verts[vi], cvxMaxs, cvxMaxs);
+                        }
+                        cd.center[0] = (cvxMins.x + cvxMaxs.x) * 0.5f;
+                        cd.center[1] = (cvxMins.y + cvxMaxs.y) * 0.5f;
+                        cd.center[2] = (cvxMins.z + cvxMaxs.z) * 0.5f;
+                        float hx = (cvxMaxs.x - cvxMins.x) * 0.5f;
+                        float hy = (cvxMaxs.y - cvxMins.y) * 0.5f;
+                        float hz = (cvxMaxs.z - cvxMins.z) * 0.5f;
+                        cd.inradius = hx;
+                        if (hy < cd.inradius) cd.inradius = hy;
+                        if (hz < cd.inradius) cd.inradius = hz;
+
+                        poly->Release();
+                        sd.convexes.push_back(std::move(cd));
+                    }
+
+                    physcollision->DestroyCollide(pCollide);
+                    solids.push_back(std::move(sd));
+                }
+
+                // ---------------------------------------------------------------
+                // Build the relocatable blob.
+                // Layout: BlobHeader → Solid[] → Convex[] → vertex/face/edge data
+                // ---------------------------------------------------------------
+                const int BLOB_HDR  = 32;
+                const int SOLID_SZ  = 144;
+                const int CONVEX_SZ = 64;
+
+                int totalConvex = 0;
+                for (auto& s : solids)
+                    totalConvex += (int)s.convexes.size();
+
+                // Phase 1: calculate offsets for each data block.
+                int solidArrayOff  = BLOB_HDR;
+                int convexArrayOff = solidArrayOff + SOLID_SZ * (int)solids.size();
+                int dataOff        = convexArrayOff + CONVEX_SZ * totalConvex;
+
+                // Per-convex data offsets.
+                struct ConvexOffsets { int verts, faces, edges; };
+                std::vector<ConvexOffsets> cvxOffsets;
+                for (auto& s : solids) {
+                    for (auto& c : s.convexes) {
+                        ConvexOffsets co;
+                        co.verts = dataOff;
+                        dataOff += (int)c.verts.size() * 12; // 3 floats
+                        co.faces = dataOff;
+                        dataOff += (int)c.faces.size() * 32; // 32 B per face
+                        co.edges = dataOff;
+                        dataOff += (int)c.edges.size() * 4;  // 4 B per edge
+                        cvxOffsets.push_back(co);
+                    }
+                }
+                int totalBlobSize = dataOff;
+
+                // Phase 2: allocate and fill the blob.
+                std::vector<uint8_t> blob(totalBlobSize, 0);
+
+                // -- Blob header (32 bytes) --
+                *reinterpret_cast<int64_t*>(&blob[0])  = solidArrayOff; // relptr
+                *reinterpret_cast<int32_t*>(&blob[8])  = (int)solids.size();
+                *reinterpret_cast<int32_t*>(&blob[24]) = totalBlobSize;
+
+                // -- Solid entries --
+                int cvxIdx = 0;
+                int curConvexOff = convexArrayOff;
+                for (int si = 0; si < (int)solids.size(); si++)
+                {
+                    uint8_t* sp = &blob[solidArrayOff + si * SOLID_SZ];
+                    SolidData& sd = solids[si];
+
+                    // +0: relptr to convex array
+                    *reinterpret_cast<int64_t*>(sp + 0) = curConvexOff;
+                    // +8: numConvexes
+                    *reinterpret_cast<int32_t*>(sp + 8) = (int)sd.convexes.size();
+                    // +16: scale = 1.0f
+                    *reinterpret_cast<float*>(sp + 16)  = 1.0f;
+                    // +32: volume center (geometric center of AABB)
+                    float vc[3] = {
+                        (sd.aabbMins.x + sd.aabbMaxs.x) * 0.5f,
+                        (sd.aabbMins.y + sd.aabbMaxs.y) * 0.5f,
+                        (sd.aabbMins.z + sd.aabbMaxs.z) * 0.5f
+                    };
+                    memcpy(sp + 32, vc, 12);
+                    // +48: approximate inertia tensor (diagonal, box approx)
+                    float dx = sd.aabbMaxs.x - sd.aabbMins.x;
+                    float dy = sd.aabbMaxs.y - sd.aabbMins.y;
+                    float dz = sd.aabbMaxs.z - sd.aabbMins.z;
+                    float vf = (sd.volume > 0) ? sd.volume : (dx * dy * dz);
+                    float c12 = vf / 12.0f;
+                    float Ixx = c12 * (dy*dy + dz*dz);
+                    float Iyy = c12 * (dx*dx + dz*dz);
+                    float Izz = c12 * (dx*dx + dy*dy);
+                    *reinterpret_cast<float*>(sp + 48) = Ixx;
+                    *reinterpret_cast<float*>(sp + 64) = Iyy;
+                    *reinterpret_cast<float*>(sp + 80) = Izz;
+                    // off-diagonal = 0 (already zeroed)
+
+                    // +96: center of mass
+                    *reinterpret_cast<float*>(sp + 96)  = sd.massCenter.x;
+                    *reinterpret_cast<float*>(sp + 100) = sd.massCenter.y;
+                    *reinterpret_cast<float*>(sp + 104) = sd.massCenter.z;
+                    // +108: reserved (0)
+                    // +112: AABB mins
+                    *reinterpret_cast<float*>(sp + 112) = sd.aabbMins.x;
+                    *reinterpret_cast<float*>(sp + 116) = sd.aabbMins.y;
+                    *reinterpret_cast<float*>(sp + 120) = sd.aabbMins.z;
+                    // +124: AABB maxs
+                    *reinterpret_cast<float*>(sp + 124) = sd.aabbMaxs.x;
+                    *reinterpret_cast<float*>(sp + 128) = sd.aabbMaxs.y;
+                    *reinterpret_cast<float*>(sp + 132) = sd.aabbMaxs.z;
+
+                    curConvexOff += CONVEX_SZ * (int)sd.convexes.size();
+
+                    // -- Convex entries --
+                    for (int ci = 0; ci < (int)sd.convexes.size(); ci++, cvxIdx++)
+                    {
+                        int cOff = convexArrayOff + cvxIdx * CONVEX_SZ;
+                        uint8_t* cp = &blob[cOff];
+                        ConvexData& cd = sd.convexes[ci];
+                        ConvexOffsets& co = cvxOffsets[cvxIdx];
+
+                        // +0..15: convex center + inradius
+                        *reinterpret_cast<float*>(cp + 0)  = cd.center[0];
+                        *reinterpret_cast<float*>(cp + 4)  = cd.center[1];
+                        *reinterpret_cast<float*>(cp + 8)  = cd.center[2];
+                        *reinterpret_cast<float*>(cp + 12) = cd.inradius;
+                        // +16: relptr to vertex list
+                        *reinterpret_cast<int64_t*>(cp + 16) = co.verts;
+                        *reinterpret_cast<int32_t*>(cp + 24) = (int)cd.verts.size();
+                        // +32: relptr to face-vert list
+                        *reinterpret_cast<int64_t*>(cp + 32) = co.faces;
+                        *reinterpret_cast<int32_t*>(cp + 40) = (int)cd.faces.size();
+                        // +48: relptr to edge list
+                        *reinterpret_cast<int64_t*>(cp + 48) = co.edges;
+                        *reinterpret_cast<int32_t*>(cp + 56) = (int)cd.edges.size();
+
+                        // --- Write vertex data ---
+                        for (int vi = 0; vi < (int)cd.verts.size(); vi++)
+                        {
+                            float* dst = reinterpret_cast<float*>(&blob[co.verts + vi * 12]);
+                            dst[0] = cd.verts[vi].x;
+                            dst[1] = cd.verts[vi].y;
+                            dst[2] = cd.verts[vi].z;
+                        }
+
+                        // --- Write face data (32 bytes each, 0xFF pad) ---
+                        for (int fi = 0; fi < (int)cd.faces.size(); fi++)
+                        {
+                            uint8_t* fp = &blob[co.faces + fi * 32];
+                            memset(fp, 0xFF, 32);
+                            int n = (int)cd.faces[fi].size();
+                            if (n > 32) n = 32;
+                            for (int k = 0; k < n; k++)
+                                fp[k] = cd.faces[fi][k];
+                        }
+
+                        // --- Write edge data (4 bytes each) ---
+                        for (int ei = 0; ei < (int)cd.edges.size(); ei++)
+                        {
+                            uint8_t* ep = &blob[co.edges + ei * 4];
+                            ep[0] = cd.edges[ei].v[0];
+                            ep[1] = cd.edges[ei].v[1];
+                            ep[2] = cd.edges[ei].v[2];
+                            ep[3] = cd.edges[ei].v[3];
+                        }
+                    }
+                }
+
+                // ---------------------------------------------------------------
+                // Write the Apex .phy file:  IVPS header + blob + keyvalues
+                // ---------------------------------------------------------------
                 struct IVPSHeader {
                     int size;            // 20
-                    int id;              // 1
+                    int id;              // >= 1 → relocatable blob path
                     int solidCount;
                     int checkSum;
-                    int keyValuesOffset;
+                    int keyValuesOffset; // from file start
                 };
                 IVPSHeader ivpsHdr;
                 ivpsHdr.size            = 20;
                 ivpsHdr.id              = 1;
-                ivpsHdr.solidCount      = srcSolidCount;
+                ivpsHdr.solidCount      = (int)solids.size();
                 ivpsHdr.checkSum        = savedChecksum;
-                ivpsHdr.keyValuesOffset = keyValuesOffset;
+                ivpsHdr.keyValuesOffset = 20 + totalBlobSize;
 
                 FILE* phyOut = fopen(phyDst.c_str(), "wb");
                 if (phyOut)
                 {
                     fwrite(&ivpsHdr, sizeof(IVPSHeader), 1, phyOut);
-                    fwrite(ivpData, 1, ivpDataSize, phyOut);
-                    if (kvSize > 0) fwrite(kvData, 1, kvSize, phyOut);
+                    fwrite(blob.data(), 1, totalBlobSize, phyOut);
+                    if (kvSize > 0)
+                        fwrite(phyBuf + kvStart, 1, kvSize, phyOut);
                     fclose(phyOut);
-                    printf("  [PHY] Converted to Apex IVPS format: %s\n", phyDst.c_str());
+
+                    // Patch the already-written RMDL header on disk:
+                    // set phySize so the mod loader knows to load the .phy file.
+                    // Note: do NOT set STUDIOHDR_FLAGS_HAS_PHYSICS_DATA (0x40000) —
+                    // that flag is for pak-embedded physics only. For separate .phy
+                    // files, phySize > 0 is sufficient (verified against reference
+                    // models like slumcity_fencewall which have phySize set but no
+                    // 0x40000 flag).
+                    {
+                        int phyFileSize = (int)(sizeof(IVPSHeader) + totalBlobSize + kvSize);
+                        FILE* rmdlPatch = fopen(rmdlPath.c_str(), "r+b");
+                        if (rmdlPatch)
+                        {
+                            fseek(rmdlPatch, offsetof(r5_studiohdr_t, phySize), SEEK_SET);
+                            fwrite(&phyFileSize, sizeof(int), 1, rmdlPatch);
+                            fclose(rmdlPatch);
+                            printf("  [PHY] Patched RMDL: phySize=%d\n", phyFileSize);
+                        }
+                    }
+
+                    printf("  [PHY] Written Apex relocatable blob: %s "
+                           "(%d solid(s), %d convex(es), %d bytes)\n",
+                           phyDst.c_str(), (int)solids.size(), totalConvex,
+                           totalBlobSize);
                 }
                 else
                 {
@@ -2650,7 +2960,8 @@ void WriteRMDLFiles(const studiohdr_t* pInMemMDL, const char* mdlFilePath)
         }
         else
         {
-            printf("  [PHY] No source .phy found at '%s' (model has no $collisionmodel?)\n", phySrc.c_str());
+            printf("  [PHY] No source .phy found at '%s' (model has no "
+                   "$collisionmodel?)\n", phySrc.c_str());
         }
     }
 
