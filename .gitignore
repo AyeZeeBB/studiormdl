@@ -7,3 +7,5 @@ src/lib/public/appframework.lib
 /src/lib/public
 build_output.txt
 *.lib
+/src/studiomdl/build
+*.py
