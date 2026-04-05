@@ -157,7 +157,7 @@ void ParseMDL_v49(char* buffer, temp::rig_t& rig, std::string output_dir, std::s
 		temp::Sequence seq(seqdescname, pMdlHdr->numbones);
 		seq.anims.reserve(24);
 		seq.path = output_dir + "/" + seqdescname;
-		seq.flags = (seqDesc->flags & 0x20 ? 0x0 : 0x20000) | (seqDesc->flags & ~0x20);
+		seq.flags = seqDesc->flags & ~0x20;
 		seq.activityname = STRING_FROM_IDX(pSeqBase, seqDesc->szactivitynameindex);
 		seq.activity = seqDesc->activity;
 		seq.actweight = seqDesc->actweight;
@@ -606,7 +606,7 @@ void ParseMDL_v53(char* buffer, temp::rig_t& rig, std::string output_dir, std::s
 		temp::Sequence seq(seqdescname, pMdlHdr->numbones);
 		seq.anims.reserve(24);
 		seq.path = output_dir + "/" + seqdescname;
-		seq.flags = (seqDesc->flags & 0x20 ? 0x0 : 0x20000) | (seqDesc->flags & ~0x20);
+		seq.flags = seqDesc->flags & ~0x20;
 		seq.activityname = STRING_FROM_IDX(pSeqBase, seqDesc->szactivitynameindex);
 		seq.activity = seqDesc->activity;
 		seq.actweight = seqDesc->actweight;
